@@ -1,0 +1,17 @@
+import_type=MAIL
+import_name=$СХЕМА
+import_print=2d33fc0b8d8d31e07ea7a3ed507c70fb
+import_timeout=1
+mail_pop3_address=pop.example.com
+mail_pop3_login=robot
+mail_pop3_pass=mypass
+mail_pop3_con_port=995
+mail_pop3_con_security=ssl
+mail_read_from=author@example.com
+mail_read_whitelist=mailbox-whitelist.index
+mail_read_whitelist=EXTENDED
+mail_post_action=DELETE
+mail_read_format=1
+mail_read_fallback_dir=Система.Тест
+mail_send_report=1
+opt_log=1

@@ -20,6 +20,8 @@
 package ImportModules;
 
 import Generic.CsvElder;
+import Utils.IOControl;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
 
@@ -88,11 +90,16 @@ public class Mail extends Import.Importer {
      * Current mail post action.
      */
     protected POST_ACTION currentPostAction = POST_ACTION.MARK;
+    
+    /**
+     * Current whitelist format.
+     */
+    protected WHITELIST_FORMAT currentFormat = WHITELIST_FORMAT.NORMAL;
 
     /**
      * Extended format whitelist map.
      */
-    protected Map<String, WhitelistRecord> whitelistRecords;
+    protected Map<String, WhitelistRecord> whitelistRecords = new HashMap<>();
     
     /**
      * Read input format switch.
@@ -111,7 +118,53 @@ public class Mail extends Import.Importer {
     public Mail(Properties givenConfig) {
         super(givenConfig);
         
+        if ("1".equals(givenConfig.getProperty("mail_read_format"))) {
+            readFormat = true;
+        }
         
+        if ("1".equals(givenConfig.getProperty("mail_send_report")) && readFormat) {
+            sendReport = true;
+        }
+        
+        if (givenConfig.containsKey("mail_pop3_security")) {
+            try {
+                currentSecurity = SECURITY.valueOf(givenConfig.getProperty("mail_pop3_security"));
+            } catch (IllegalArgumentException iaex) {
+                IOControl.serverWrapper.log(IOControl.IMPORT_LOGID + ":" + importerName, 1, "неможливо встановити параметр mail_pop3_con_security: " + givenConfig.getProperty("mail_pop3_security"));
+            }
+        }
+
+        if (givenConfig.containsKey("mail_post_action")) {
+            try {
+                currentPostAction = POST_ACTION.valueOf(givenConfig.getProperty("mail_post_action"));
+            } catch (IllegalArgumentException iaex) {
+                IOControl.serverWrapper.log(IOControl.IMPORT_LOGID + ":" + importerName, 1, "неможливо встановити параметр mail_post_action: " + givenConfig.getProperty("mail_post_action"));
+            }
+        }
+        
+        if (givenConfig.containsKey("mail_read_whitelist_format")) {
+            try {
+                currentFormat = WHITELIST_FORMAT.valueOf(givenConfig.getProperty("mail_read_whitelist_format"));
+            } catch (IllegalArgumentException iaex) {
+                IOControl.serverWrapper.log(IOControl.IMPORT_LOGID + ":" + importerName, 1, "неможливо встановити параметр mail_read_whitelist_format: " + givenConfig.getProperty("mail_read_whitelist_format"));
+            }
+        }
+
+        //Attempt to read whitelist from file
+        if (givenConfig.containsKey("mail_read_whitelist")) {
+            readWhitelist(givenConfig.getProperty("mail_read_whitelist"));
+        }
+        
+        //Attempt to read whitelist address from config if extraction from file failed
+        if (givenConfig.containsKey("mail_read_from") && whitelistRecords.isEmpty()) {
+            whitelistRecords.put(givenConfig.getProperty("mail_read_from"), null);
+        }
+        
+        //Enable dirty state if there is no address to accept
+        if (whitelistRecords.isEmpty()){
+            IOControl.serverWrapper.log(IOControl.IMPORT_LOGID + ":" + importerName, 1, "немає адрес для прийому повідомлень!");
+            IOControl.serverWrapper.enableDirtyState("MAIL", importerName, importerPrint);
+        }
     }
 
     @Override
@@ -127,6 +180,26 @@ public class Mail extends Import.Importer {
     @Override
     public void tryRecover() {
         // Do nothing now.
+    }
+    
+    private void readWhitelist(String filename) {
+        try {
+            String[] records = new String(java.nio.file.Files.readAllBytes(new java.io.File(IOControl.IMPORT_DIR + "/" + filename).toPath())).split("\n");
+            for (String currRecord: records) {
+                if (currentFormat == WHITELIST_FORMAT.NORMAL) {
+                    whitelistRecords.put(currRecord, null);
+                }
+                else {
+                    WhitelistRecord newRecord = new WhitelistRecord(currRecord);
+                    whitelistRecords.put(newRecord.ADDRESS, newRecord);
+                }
+            }
+            IOControl.serverWrapper.log(IOControl.IMPORT_LOGID + ":" + importerName, 3, "завантажено список з адресами: " + whitelistRecords.size());
+        } catch (java.io.IOException ex) {
+            IOControl.serverWrapper.log(IOControl.IMPORT_LOGID + ":" + importerName, 1, 
+            "неможливо прочитати список дозволених адрес для прийому - імпорт буде дозволено тільки для адреси з параметра 'mail_read_from'\n"
+            + "Шлях до файлу списку розсилки:" + IOControl.IMPORT_DIR + "/" + filename);
+        }
     }
     
     /**

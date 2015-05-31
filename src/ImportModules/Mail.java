@@ -21,9 +21,16 @@ package ImportModules;
 
 import Generic.CsvElder;
 import Utils.IOControl;
+import com.sun.mail.util.MailSSLSocketFactory;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
+import javax.mail.Address;
+import javax.mail.Folder;
+import javax.mail.Message;
+import javax.mail.Session;
+import javax.mail.Store;
+import javax.mail.internet.InternetAddress;
 
 /**
  * Mail POP3 import class.
@@ -107,9 +114,14 @@ public class Mail extends Import.Importer {
     protected Boolean readFormat = false;
     
     /**
-     * Send answer to author
+     * Send answer to author.
      */
     protected Boolean sendReport = false;
+    
+    /**
+     * Make trust to all certs.
+     */
+    protected Boolean trustAllCerts = false;
     
     /**
      * Default constructor;
@@ -124,6 +136,10 @@ public class Mail extends Import.Importer {
         
         if ("1".equals(givenConfig.getProperty("mail_send_report")) && readFormat) {
             sendReport = true;
+        }
+        
+        if ("1".equals(givenConfig.getProperty("mail_pop3_trust_all"))) {
+            trustAllCerts = true;
         }
         
         if (givenConfig.containsKey("mail_pop3_security")) {
@@ -169,7 +185,75 @@ public class Mail extends Import.Importer {
 
     @Override
     protected void doImport() {
-        // Do nothing now.
+        try {
+            final Properties mailInit = new Properties();
+            if (currentSecurity == SECURITY.NONE) {
+                mailInit.put("mail.store.protocol", "pop3");
+            }
+            else {
+                mailInit.put("mail.store.protocol", "pop3s");
+            }
+            
+            if (trustAllCerts) {
+                MailSSLSocketFactory socketFactory= new MailSSLSocketFactory();
+                socketFactory.setTrustAllHosts(true);
+                mailInit.put("mail.pop3s.ssl.socketFactory", socketFactory);
+            }
+            
+            Session session = Session.getDefaultInstance(mailInit);
+            session.setDebug(true);
+            Store store = session.getStore();
+            store.connect(currConfig.getProperty("mail_pop3_address"), currConfig.getProperty("mail_pop3_login"), currConfig.getProperty("mail_pop3_pass"));
+            
+            Folder folder = store.getDefaultFolder().getFolder("INBOX");
+            folder.open(Folder.READ_ONLY);
+            Message[] messages = folder.getMessages();
+            
+            for (Message currMessage: messages) {
+                InternetAddress[] addresses = (InternetAddress[]) currMessage.getFrom();
+                Boolean pass = false;
+                WhitelistRecord passRecord = null;
+                InternetAddress passedAddr = null;
+                for (InternetAddress currAddr: addresses) {
+                    if (whitelistRecords.containsKey(currAddr.getAddress())) {
+                        pass = true;
+                        whitelistRecords.get(currAddr.getAddress());
+                        passedAddr = currAddr;
+                        break;
+                    }
+                }
+                
+                if (pass) {
+                    MessageClasses.Message newMessage = new MessageClasses.Message();
+                    newMessage.HEADER = currMessage.getSubject();
+                    newMessage.AUTHOR = "root";
+                    newMessage.TAGS = new String[] {"тест"};
+                    newMessage.LANG = "UKN";
+                    newMessage.ORIG_INDEX = "-1";
+                    Object content = currMessage.getContent();
+                    newMessage.CONTENT = content.toString();
+                    if (passRecord != null) {
+                        newMessage.setCopyright("root", passRecord.COPYRIGHT);
+                        newMessage.DIRS = passRecord.DIRS;
+                    } else {
+                        newMessage.setCopyright("root", passedAddr.getPersonal());
+                        newMessage.DIRS = new String[] {currConfig.getProperty("mail_read_fallback_dir")};
+                    }
+                    IOControl.serverWrapper.addMessage(importerName, "MAIL", newMessage);
+                    
+                    //Log this event if such behavior specified by config.
+                    if ("1".equals(currConfig.getProperty("opt_log"))) {
+                        IOControl.serverWrapper.log(IOControl.IMPORT_LOGID + ":" + importerName, 3, "прозведено поштового листа від " + passedAddr.getAddress());
+                    }
+                }
+            }
+            
+            IOControl.serverWrapper.log(IOControl.IMPORT_LOGID + ":" + importerName, 1, "Пошта завантажена: " + messages.length);
+        }
+        catch (Exception ex) {
+            IOControl.serverWrapper.log(IOControl.IMPORT_LOGID + ":" + importerName, 0, "Виклик pop3 завершено невдачею");
+            ex.printStackTrace();
+        }
     }
 
     @Override

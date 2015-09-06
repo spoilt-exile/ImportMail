@@ -73,7 +73,8 @@
     <target name="-post-jar">
   <jar jarfile="dist/ImportMail_static.jar">
     <zipfileset src="${dist.jar}" excludes="META-INF/*" />
-    <zipfileset src="dist/lib/mail.jar" excludes="META-INF/*" />
+    <zipfileset src="dist/lib/javax.mail.jar" excludes="META-INF/*" />
+    <zipfileset src="dist/lib/jsoup-1.8.3.jar" excludes="META-INF/*" />
   </jar>
 </target>
 </project>

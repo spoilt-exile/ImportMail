@@ -22,15 +22,28 @@ package ImportModules;
 import Generic.CsvElder;
 import Utils.IOControl;
 import com.sun.mail.util.MailSSLSocketFactory;
+import com.sun.mail.util.QPDecoderStream;
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
-import javax.mail.Address;
+import javax.activation.DataSource;
+import javax.mail.Flags;
 import javax.mail.Folder;
 import javax.mail.Message;
+import javax.mail.MessagingException;
+import javax.mail.Multipart;
 import javax.mail.Session;
 import javax.mail.Store;
 import javax.mail.internet.InternetAddress;
+import javax.mail.internet.MimeMessage;
+import javax.mail.internet.MimeMultipart;
+import javax.mail.util.ByteArrayDataSource;
+import javax.mail.util.SharedByteArrayInputStream;
+import org.jsoup.Jsoup;
 
 /**
  * Mail POP3 import class.
@@ -181,6 +194,8 @@ public class Mail extends Import.Importer {
             IOControl.serverWrapper.log(IOControl.IMPORT_LOGID + ":" + importerName, 1, "немає адрес для прийому повідомлень!");
             IOControl.serverWrapper.enableDirtyState("MAIL", importerName, importerPrint);
         }
+        
+        System.setProperty("mail.mime.multipart.ignoreexistingboundaryparameter", "true");
     }
 
     @Override
@@ -206,7 +221,7 @@ public class Mail extends Import.Importer {
             store.connect(currConfig.getProperty("mail_pop3_address"), currConfig.getProperty("mail_pop3_login"), currConfig.getProperty("mail_pop3_pass"));
             
             Folder folder = store.getDefaultFolder().getFolder("INBOX");
-            folder.open(Folder.READ_ONLY);
+            folder.open(Folder.READ_WRITE);
             Message[] messages = folder.getMessages();
             
             for (Message currMessage: messages) {
@@ -223,30 +238,38 @@ public class Mail extends Import.Importer {
                     }
                 }
                 
+                if (currentPostAction == POST_ACTION.MARK && currMessage.getFlags().contains(Flags.Flag.SEEN)) {
+                    pass = false;
+                }
+                
                 if (pass) {
-                    MessageClasses.Message newMessage = new MessageClasses.Message();
-                    newMessage.HEADER = currMessage.getSubject();
-                    newMessage.AUTHOR = "root";
-                    newMessage.TAGS = new String[] {"тест"};
-                    newMessage.LANG = "UKN";
-                    newMessage.ORIG_INDEX = "-1";
-                    Object content = currMessage.getContent();
-                    newMessage.CONTENT = content.toString();
-                    if (passRecord != null) {
-                        newMessage.setCopyright("root", passRecord.COPYRIGHT);
-                        newMessage.DIRS = passRecord.DIRS;
+
+                    MessageClasses.Message mailMessage = this.readMail(passedAddr, currMessage, passRecord);
+                    if (mailMessage.CONTENT != null) {
+                        IOControl.serverWrapper.addMessage(importerName, "MAIL", mailMessage);
+
+                        switch (currentPostAction) {
+                            case DELETE:
+                                currMessage.setFlag(Flags.Flag.DELETED, true);
+                                break;
+                            case MARK:
+                                currMessage.setFlag(Flags.Flag.SEEN, true);
+                                break;
+                        }
+                        
+                        //Log this event if such behavior specified by config.
+                        if ("1".equals(currConfig.getProperty("opt_log"))) {
+                            IOControl.serverWrapper.log(IOControl.IMPORT_LOGID + ":" + importerName, 3, "прозведено поштового листа від " + passedAddr.getAddress());
+                        }
                     } else {
-                        newMessage.setCopyright("root", passedAddr.getPersonal());
-                        newMessage.DIRS = new String[] {currConfig.getProperty("mail_read_fallback_dir")};
+                        IOControl.serverWrapper.log(IOControl.IMPORT_LOGID + ":" + importerName, 1, "не вдалося відділити зміст повідомлення: " + currMessage.getSubject() + " - " + currMessage.getSentDate().toString());
                     }
-                    IOControl.serverWrapper.addMessage(importerName, "MAIL", newMessage);
-                    
-                    //Log this event if such behavior specified by config.
-                    if ("1".equals(currConfig.getProperty("opt_log"))) {
-                        IOControl.serverWrapper.log(IOControl.IMPORT_LOGID + ":" + importerName, 3, "прозведено поштового листа від " + passedAddr.getAddress());
-                    }
+
                 }
             }
+            
+            folder.close(true);
+            store.close();
             
             IOControl.serverWrapper.log(IOControl.IMPORT_LOGID + ":" + importerName, 1, "Пошта завантажена: " + messages.length);
         }
@@ -266,6 +289,71 @@ public class Mail extends Import.Importer {
         // Do nothing now.
     }
     
+    private MessageClasses.Message readMail(InternetAddress address, Message message, WhitelistRecord passRecord) throws MessagingException, IOException {
+        MessageClasses.Message newMessage = new MessageClasses.Message();
+        newMessage.HEADER = message.getSubject();
+        newMessage.AUTHOR = "root";
+        newMessage.TAGS = new String[] {"тест"};
+        newMessage.LANG = "UKN";
+        newMessage.ORIG_INDEX = "-1";
+        
+        MimeMessage pop3Message = (MimeMessage) message;
+        Object content = pop3Message.getContent();
+        
+        if (pop3Message.isMimeType("text/plain")) {
+            if (content instanceof SharedByteArrayInputStream || content instanceof QPDecoderStream) {
+                InputStream stream = (InputStream) content;
+
+                BufferedReader reader = new BufferedReader(new InputStreamReader(stream));
+
+                StringBuffer contentBuffer = new StringBuffer();
+                String currentLine = null;
+                while ((currentLine = reader.readLine()) != null) {
+                    contentBuffer.append(currentLine);
+                    contentBuffer.append("\n");
+                }
+                newMessage.CONTENT = contentBuffer.toString();
+            }
+        } else if (pop3Message.isMimeType("multipart/*")) {
+            DataSource source = new ByteArrayDataSource(pop3Message.getInputStream(), "multipart/*");
+            Multipart mp = new MimeMultipart(source); 
+            
+            int count = mp.getCount();
+            
+            
+            newMessage.CONTENT = "EMPTY MESSAGE";
+        } else if (pop3Message.isMimeType("text/html")) {
+            if (content instanceof SharedByteArrayInputStream || content instanceof QPDecoderStream) {
+                InputStream stream = (InputStream) content;
+
+                BufferedReader reader = new BufferedReader(new InputStreamReader(stream));
+
+                StringBuffer contentBuffer = new StringBuffer();
+                String currentLine = null;
+                while ((currentLine = reader.readLine()) != null) {
+                    contentBuffer.append(currentLine);
+                    contentBuffer.append("\n");
+                }
+                String plainText = Jsoup.parse(contentBuffer.toString()).text();
+                newMessage.CONTENT = plainText;
+            }
+        }
+        
+        if (passRecord != null) {
+            newMessage.setCopyright("root", passRecord.COPYRIGHT);
+            newMessage.DIRS = passRecord.DIRS;
+        } else {
+            newMessage.setCopyright("root", address.getPersonal());
+            newMessage.DIRS = new String[] {currConfig.getProperty("mail_read_fallback_dir")};
+        }
+        
+        return newMessage;
+    }
+    
+    /**
+     * Read white list records from file depending on it's format and fill records map.
+     * @param filename file to read;
+     */
     private void readWhitelist(String filename) {
         try {
             String[] records = new String(java.nio.file.Files.readAllBytes(new java.io.File(IOControl.IMPORT_DIR + "/" + filename).toPath())).split("\n");

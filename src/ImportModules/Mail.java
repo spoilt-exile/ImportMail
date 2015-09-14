@@ -21,6 +21,7 @@ package ImportModules;
 
 import Generic.CsvElder;
 import Utils.IOControl;
+import com.sun.mail.util.BASE64DecoderStream;
 import com.sun.mail.util.MailSSLSocketFactory;
 import com.sun.mail.util.QPDecoderStream;
 import java.io.BufferedReader;
@@ -30,6 +31,8 @@ import java.io.InputStreamReader;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import javax.activation.DataSource;
 import javax.mail.Flags;
 import javax.mail.Folder;
@@ -137,6 +140,16 @@ public class Mail extends Import.Importer {
     protected Boolean trustAllCerts = false;
     
     /**
+     * Debug POP3 connection.
+     */
+    protected Boolean debugMail = false;
+    
+    /**
+     * Report sender instance.
+     */
+    private ReportSender sender;
+    
+    /**
      * Default constructor;
      * @param givenConfig scheme config properties;
      */
@@ -153,6 +166,10 @@ public class Mail extends Import.Importer {
         
         if ("1".equals(givenConfig.getProperty("mail_pop3_trust_all"))) {
             trustAllCerts = true;
+        }
+        
+        if ("1".equals(givenConfig.getProperty("mail_pop3_debug"))) {
+            debugMail = true;
         }
         
         if (givenConfig.containsKey("mail_pop3_security")) {
@@ -195,6 +212,10 @@ public class Mail extends Import.Importer {
             IOControl.serverWrapper.enableDirtyState("MAIL", importerName, importerPrint);
         }
         
+        if (sendReport) {
+            sender = new ReportSender(givenConfig);
+        }
+        
         System.setProperty("mail.mime.multipart.ignoreexistingboundaryparameter", "true");
     }
 
@@ -215,8 +236,8 @@ public class Mail extends Import.Importer {
                 mailInit.put("mail.pop3s.ssl.socketFactory", socketFactory);
             }
             
-            Session session = Session.getDefaultInstance(mailInit);
-            session.setDebug(true);
+            Session session = Session.getInstance(mailInit);
+            session.setDebug(debugMail);
             Store store = session.getStore();
             store.connect(currConfig.getProperty("mail_pop3_address"), currConfig.getProperty("mail_pop3_login"), currConfig.getProperty("mail_pop3_pass"));
             
@@ -229,6 +250,12 @@ public class Mail extends Import.Importer {
                 Boolean pass = false;
                 WhitelistRecord passRecord = null;
                 InternetAddress passedAddr = null;
+                
+                if (currentPostAction == POST_ACTION.MARK && currMessage.getFlags().contains(Flags.Flag.SEEN)) {
+                    pass = false;
+                    continue;
+                }
+                
                 for (InternetAddress currAddr: addresses) {
                     if (whitelistRecords.containsKey(currAddr.getAddress())) {
                         pass = true;
@@ -238,14 +265,11 @@ public class Mail extends Import.Importer {
                     }
                 }
                 
-                if (currentPostAction == POST_ACTION.MARK && currMessage.getFlags().contains(Flags.Flag.SEEN)) {
-                    pass = false;
-                }
-                
                 if (pass) {
 
-                    MessageClasses.Message mailMessage = this.readMail(passedAddr, currMessage, passRecord);
+                    final MessageClasses.Message mailMessage = this.readMail(passedAddr, currMessage, passRecord);
                     if (mailMessage.CONTENT != null) {
+                        mailMessage.addProperty("root", this.importerName, this.importerPrint);
                         IOControl.serverWrapper.addMessage(importerName, "MAIL", mailMessage);
 
                         switch (currentPostAction) {
@@ -257,6 +281,22 @@ public class Mail extends Import.Importer {
                                 break;
                         }
                         
+                        if (sendReport) {
+                            final InternetAddress recipientAddress = passedAddr;
+                            Runnable reportRun = new Runnable() {
+                                @Override
+                                public void run() {
+                                    try {
+                                        sender.sendMessageAsMail(mailMessage, recipientAddress);
+                                    } catch (MessagingException ex) {
+                                        IOControl.serverWrapper.log(IOControl.IMPORT_LOGID + ":" + importerName, 0, "Надсилання відповіді завершилось невдачею");
+                                        IOControl.serverWrapper.postException("Надсилання відповіді завершилось невдачею", ex);
+                                    }
+                                }
+                            };
+                            new Thread(reportRun).start();
+                        }
+                        
                         //Log this event if such behavior specified by config.
                         if ("1".equals(currConfig.getProperty("opt_log"))) {
                             IOControl.serverWrapper.log(IOControl.IMPORT_LOGID + ":" + importerName, 3, "прозведено поштового листа від " + passedAddr.getAddress());
@@ -264,18 +304,15 @@ public class Mail extends Import.Importer {
                     } else {
                         IOControl.serverWrapper.log(IOControl.IMPORT_LOGID + ":" + importerName, 1, "не вдалося відділити зміст повідомлення: " + currMessage.getSubject() + " - " + currMessage.getSentDate().toString());
                     }
-
                 }
             }
             
             folder.close(true);
             store.close();
-            
-            IOControl.serverWrapper.log(IOControl.IMPORT_LOGID + ":" + importerName, 1, "Пошта завантажена: " + messages.length);
         }
         catch (Exception ex) {
             IOControl.serverWrapper.log(IOControl.IMPORT_LOGID + ":" + importerName, 0, "Виклик pop3 завершено невдачею");
-            ex.printStackTrace();
+            IOControl.serverWrapper.postException("Виклик pop3 завершено невдачею", ex);
         }
     }
 
@@ -301,7 +338,7 @@ public class Mail extends Import.Importer {
         Object content = pop3Message.getContent();
         
         if (pop3Message.isMimeType("text/plain")) {
-            if (content instanceof SharedByteArrayInputStream || content instanceof QPDecoderStream) {
+            if (content instanceof SharedByteArrayInputStream || content instanceof QPDecoderStream || content instanceof BASE64DecoderStream) {
                 InputStream stream = (InputStream) content;
 
                 BufferedReader reader = new BufferedReader(new InputStreamReader(stream));
